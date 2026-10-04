@@ -1,21 +1,20 @@
-import {readDocument,scanPhoto,compareDelivery,stopReader,suggestedReadings} from './local-engine.js';
+import {readDocument,readDocumentPhoto,scanPhoto,compareOverview,stopReader} from './local-engine.js';
 const $=id=>document.getElementById(id);
-const state={pdf:null,photos:[],results:null,document:null,detections:[],selected:0,busy:false,preparing:0,generation:0,recognitionMs:0,started:0};
-const labels={confirmed:'Confirmed',mismatch:'Mismatch',unverified:'Unverified'};
+const state={documentFile:null,photo:null,document:null,results:null,selected:0,busy:false,preparing:0,generation:0};
+const labels={confirmed:'Visible match',mismatch:'Mismatch',unverified:'Unverified'};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function error(s){$('error').textContent=s;$('error').hidden=!s;}
-function view(which){for(const x of ['upload','loading','review','result'])$(x+'-view').hidden=x!==which;}
-function revoke(){if(state.pdf)URL.revokeObjectURL(state.pdf.url);for(const p of state.photos)URL.revokeObjectURL(p.url);}
-function reset(){state.generation++;state.preparing=0;stopReader();revoke();Object.assign(state,{pdf:null,photos:[],results:null,document:null,detections:[],selected:0,busy:false});$('pdf-input').value='';$('photo-input').value='';$('mode').textContent='FREE · LOCAL CHECKING';view('upload');error('');renderFiles();}
+function view(which){for(const x of ['upload','loading','result'])$(x+'-view').hidden=x!==which;}
+function reset(){state.generation++;stopReader();for(const item of [state.documentFile,state.photo])if(item)URL.revokeObjectURL(item.url);Object.assign(state,{documentFile:null,photo:null,document:null,results:null,selected:0,busy:false,preparing:0});view('upload');error('');renderFiles();}
 function renderFiles(){
- $('pdf-files').innerHTML=state.pdf?`<div class="file-item"><span>${esc(state.pdf.name)}</span><button class="remove" aria-label="Remove PDF" id="remove-pdf">×</button></div>`:'';
- $('remove-pdf')?.addEventListener('click',()=>{URL.revokeObjectURL(state.pdf.url);state.pdf=null;renderFiles();});
- $('photo-files').innerHTML=state.photos.map((p,i)=>`<div class="thumb"><img src="${esc(p.url)}" alt="Delivery photo ${i+1}"><button class="remove" data-remove="${i}" aria-label="Remove photo ${i+1}">×</button><span>${esc(p.name)}</span></div>`).join('');
- document.querySelectorAll('[data-remove]').forEach(b=>b.onclick=()=>{const p=state.photos.splice(Number(b.dataset.remove),1)[0];URL.revokeObjectURL(p.url);renderFiles();});
- $('verify').disabled=!(state.pdf&&state.photos.length)||state.preparing>0||state.busy;
- $('readiness').textContent=state.preparing?'Preparing your photos…':!state.pdf&&!state.photos.length?'Add a packing-list PDF and at least one delivery photo.':!state.pdf?'Photo added. Add the packing-list PDF to compare it against.':!state.photos.length?'Packing list added. Add at least one delivery photo.':`${state.photos.length} photo${state.photos.length===1?'':'s'} and PDF ready. Select “Read labels” to continue.`;
+ const d=state.documentFile,p=state.photo;
+ $('pdf-files').innerHTML=d?`<div class="file-item">${d.isPDF?'':`<img class="document-thumb" src="${esc(d.url)}" alt="Uploaded document">`}<span>${esc(d.name)}</span><button class="remove" id="remove-document" aria-label="Remove document">×</button></div>`:'';
+ $('remove-document')?.addEventListener('click',()=>{URL.revokeObjectURL(d.url);state.documentFile=null;renderFiles();});
+ $('photo-files').innerHTML=p?`<div class="thumb"><img src="${esc(p.url)}" alt="Entire delivery photo"><button class="remove" id="remove-photo" aria-label="Remove delivery photo">×</button><span>${esc(p.name)}</span></div>`:'';
+ $('remove-photo')?.addEventListener('click',()=>{URL.revokeObjectURL(p.url);state.photo=null;renderFiles();});
+ $('verify').disabled=!(d&&p)||state.busy||state.preparing>0;
+ $('readiness').textContent=state.preparing?'Preparing your upload…':!d&&!p?'Add your document and one delivery photo.':!d?'Delivery photo added. Add a document photo or PDF.':!p?'Document added. Add one photo of all delivered items.':'Both files are ready. Select “Check delivery”.';
 }
-function setPDF(file){error('');if(!file)return;if(file.size>5*1024*1024||!file.name.toLowerCase().endsWith('.pdf'))return error('Please add a PDF up to 5 MB.');if(state.pdf)URL.revokeObjectURL(state.pdf.url);state.pdf={file,url:URL.createObjectURL(file),name:file.name};renderFiles();}
 async function preparePhoto(file){
  if(file.size>20*1024*1024)throw new Error('This photo is larger than 20 MB. Please export a smaller image.');
  if(!/\.(jpe?g|png|webp|avif)$/i.test(file.name)&&!['image/jpeg','image/png','image/webp','image/avif'].includes(file.type))throw new Error('Please use JPG, PNG, WEBP or AVIF. For iPhone HEIC photos, export as JPG first.');
@@ -27,43 +26,51 @@ async function preparePhoto(file){
   return new File([blob],file.name.replace(/\.[^.]+$/,'')+'.jpg',{type:'image/jpeg'});
  }catch{throw new Error('This image could not be opened. Please export it as JPG or PNG and try again.');}finally{URL.revokeObjectURL(url);}
 }
-async function addPhotos(files){
- error('');const list=Array.from(files);if(!list.length)return;if(state.preparing)return error('Please wait while the current photos are prepared.');
- const seenFiles=new Set(state.photos.map(p=>p.originalKey));const fresh=list.filter(f=>{const key=`${f.name}:${f.size}:${f.lastModified}`;if(seenFiles.has(key))return false;seenFiles.add(key);return true;});if(!fresh.length)return;
- if(state.photos.length+fresh.length>3)return error('You can add up to three photos. Remove or replace a photo to continue.');
- const generation=state.generation;state.preparing++;renderFiles();const prepared=[];try{for(const original of fresh){const file=await preparePhoto(original);prepared.push({file,url:URL.createObjectURL(file),name:original.name,originalKey:`${original.name}:${original.size}:${original.lastModified}`});}if(generation!==state.generation){for(const p of prepared)URL.revokeObjectURL(p.url);return;}state.photos.push(...prepared);}catch(e){for(const p of prepared)URL.revokeObjectURL(p.url);if(generation===state.generation)error(e.message);}finally{if(generation===state.generation){state.preparing--;renderFiles();}}
+async function setInput(files,kind){
+ const list=Array.from(files);if(list.length!==1)return error(kind==='documentFile'?'Choose one document photo or PDF.':'Choose one overview photo containing all items.');
+ if(state.busy||state.preparing)return error('Please wait while the current file is prepared.');
+ const original=list[0],isPDF=kind==='documentFile'&&(/\.pdf$/i.test(original.name)||original.type==='application/pdf');
+ const generation=state.generation;state.preparing++;error('');renderFiles();
+ try{if(isPDF&&original.size>5*1024*1024)throw new Error('Please use a PDF up to 5 MB.');const file=isPDF?original:await preparePhoto(original);if(generation!==state.generation)return;
+  if(state[kind])URL.revokeObjectURL(state[kind].url);state[kind]={file,url:URL.createObjectURL(file),name:original.name,isPDF};
+ }catch(e){if(generation===state.generation)error(e.message);}finally{if(generation===state.generation){state.preparing--;renderFiles();}}
 }
-$('pdf-input').addEventListener('change',e=>{setPDF(e.target.files[0]);e.target.value=''});$('photo-input').addEventListener('change',e=>{addPhotos(e.target.files);e.target.value=''});
-for(const [id,fn]of [['pdf-drop',f=>f.length===1?setPDF(f[0]):error('Please add one PDF.')],['photo-drop',addPhotos]]){const el=$(id);el.addEventListener('dragover',e=>{e.preventDefault();el.classList.add('dragover')});el.addEventListener('dragleave',()=>el.classList.remove('dragover'));el.addEventListener('drop',e=>{e.preventDefault();el.classList.remove('dragover');fn(e.dataTransfer.files)});}
-
+$('pdf-input').onchange=e=>{setInput(e.target.files,'documentFile');e.target.value='';};$('photo-input').onchange=e=>{setInput(e.target.files,'photo');e.target.value='';};
+for(const [id,kind]of [['pdf-drop','documentFile'],['photo-drop','photo']]){const el=$(id);el.ondragover=e=>{e.preventDefault();el.classList.add('dragover');};el.ondragleave=()=>el.classList.remove('dragover');el.ondrop=e=>{e.preventDefault();el.classList.remove('dragover');setInput(e.dataTransfer.files,kind);};}
+async function timed(operation){let timer;try{return await Promise.race([operation,new Promise((_,reject)=>{timer=setTimeout(()=>{stopReader();reject(new Error('Reading took too long. Try smaller, sharper photos. Your files are still here.'));},90000);})]);}finally{clearTimeout(timer);}}
 async function verify(){
- if(state.busy||state.preparing||!state.pdf||!state.photos.length)return;
- state.busy=true;const generation=state.generation;state.started=performance.now();error('');view('loading');$('loading-message').textContent='Reading the packing list…';
- try{state.document=await readDocument(state.pdf.file);if(generation!==state.generation)return;state.detections=[];
-  for(let i=0;i<state.photos.length;i++){if(generation!==state.generation)return;$('loading-message').textContent=`Preparing the local reader for photo ${i+1}…`;let timer;const result=await Promise.race([scanPhoto(state.photos[i].url,i,message=>{if(generation===state.generation)$('loading-message').textContent=message;}),new Promise((_,reject)=>{timer=setTimeout(()=>{stopReader();reject(new Error('The local reader timed out.'))},90000);})]).finally(()=>clearTimeout(timer));state.detections.push(...result.detections);}
-  if(generation!==state.generation)return;state.recognitionMs=performance.now()-state.started;await renderReview();
- }catch(e){if(generation===state.generation){view('upload');error(/PDF|packing list|product rows|product types|quantities|page/i.test(e.message)?e.message:'The local reader could not finish. Your files are still here. Try a clear close-up of the label, or reload the page.');}}
+ if(state.busy||state.preparing||!state.documentFile||!state.photo)return;
+ const generation=state.generation;state.busy=true;const start=performance.now();error('');view('loading');
+ const progress=message=>{if(generation===state.generation)$('loading-message').textContent=message;};
+ try{
+  progress('Reading product codes and quantities from your document…');
+  state.document=await timed(state.documentFile.isPDF?readDocument(state.documentFile.file):readDocumentPhoto(state.documentFile.url,progress));
+  if(generation!==state.generation)return;progress('Reading visible product labels in the delivery photo…');
+  const result=await timed(scanPhoto(state.photo.url,0,progress));if(generation!==state.generation)return;
+  state.results={findings:compareOverview(state.document.rows,result.detections),duration:performance.now()-start};state.selected=0;renderResults();
+ }catch(e){if(generation===state.generation){view('upload');error(e.message||'The reader could not finish. Please try sharper photos.');}}
  finally{if(generation===state.generation){state.busy=false;renderFiles();}}
 }
-async function renderReview(){
- view('review');$('review-note').textContent=state.detections.length?`Found ${state.detections.length} code region${state.detections.length===1?'':'s'}. Check the text against each photo and select the printed unit letter. Leave unclear labels unconfirmed.`:'No readable product codes were detected. You can add clearer close-ups, or continue to see which document rows remain unverified.';
- $('review-complete').checked=false;$('review-coverage').checked=false;
- $('detected-labels').innerHTML=state.detections.map((d,i)=>`<article class="detected-label"><div class="review-region"><img id="review-photo-${i}" alt="Detected code region in photo ${d.photo+1}"></div><strong>${esc(d.sku)}</strong>${suggestedReadings(d.sku,state.document.rows).length?`<label>Check for a reading error. Choose the code actually printed in this photo.<select data-reading="${i}"><option value="${esc(d.sku)}">${esc(d.sku)} — OCR reading</option>${suggestedReadings(d.sku,state.document.rows).map(code=>`<option value="${esc(code)}">${esc(code)} — confirm from photo</option>`).join('')}</select></label>`:''}<small>Read from photo ${d.photo+1}</small><label class="confirm-line"><input type="checkbox" data-confirm="${i}">This code matches the visible label</label><label>Printed unit letter<select data-unit="${i}" aria-label="Printed unit letter for code ${esc(d.sku)}"><option value="">Unclear / not visible</option>${'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(letter=>`<option value="${letter}" ${d.unit===letter?'selected':''}>${letter}</option>`).join('')}</select></label></article>`).join('');
- document.querySelectorAll('[data-reading]').forEach(input=>input.onchange=()=>{const d=state.detections[Number(input.dataset.reading)];d.sku=input.value;input.closest('.detected-label').querySelector('strong').textContent=d.sku;d.verified=false;document.querySelector(`[data-confirm="${input.dataset.reading}"]`).checked=false;});
- for(let i=0;i<state.detections.length;i++){const d=state.detections[i];d.verified=false;const img=new Image();img.src=state.photos[d.photo].url;await img.decode();const [x,y,w,h]=d.bbox;const left=Math.max(0,x-w*.6),top=Math.max(0,y-h*5),right=Math.min(1,x+w*2.3),bottom=Math.min(1,y+h*2.3);d.evidence_bbox=[left,top,right-left,bottom-top];const c=document.createElement('canvas');c.width=(right-left)*img.naturalWidth;c.height=(bottom-top)*img.naturalHeight;c.getContext('2d').drawImage(img,left*img.naturalWidth,top*img.naturalHeight,c.width,c.height,0,0,c.width,c.height);$(`review-photo-${i}`).src=c.toDataURL('image/jpeg',.94);}
- document.querySelectorAll('[data-confirm]').forEach(input=>input.onchange=()=>{state.detections[Number(input.dataset.confirm)].verified=input.checked;});
- document.querySelectorAll('[data-unit]').forEach(input=>input.onchange=()=>{state.detections[Number(input.dataset.unit)].unit=input.value;});
+function renderResults(){
+ view('result');const rows=state.results.findings;const counts={confirmed:0,mismatch:0,unverified:0};rows.forEach(r=>counts[r.status]++);
+ $('result-title').textContent=counts.mismatch?'Visible differences found':counts.unverified?'Some items need a clearer view':'Visible quantities match';
+ $('result-note').textContent='Automatic comparison of readable printed codes. Hidden labels and unlabelled goods cannot be checked. A visible match is not a guarantee of complete delivery.';
+ $('summary').innerHTML=[['confirmed','Visible matches'],['mismatch','Mismatches'],['unverified','Unverified']].map(([k,s])=>`<div><strong>${counts[k]}</strong><span>${s}</span></div>`).join('');
+ $('findings').innerHTML=rows.map((r,i)=>`<button class="finding ${state.selected===i?'selected':''}" data-row="${i}" aria-pressed="${state.selected===i}"><strong>${esc(r.name)}</strong><span class="sku">${esc(r.sku)} · Row ${r.row}</span><span class="badge ${r.status}">${labels[r.status]}</span><p>Ordered: ${r.expected} · Readable labels: ${r.observed===null?'unknown':r.observed}</p></button>`).join('');
+ document.querySelectorAll('[data-row]').forEach(b=>b.onclick=()=>{state.selected=Number(b.dataset.row);renderResults();});
+ $('metrics').textContent=`Time to result: ${(state.results.duration/1000).toFixed(1)} s · Recognition API cost: $0 · Hosting excluded`;
+ showEvidence(0);
 }
-$('compare-labels').onclick=()=>{state.results={findings:compareDelivery(state.document.rows,state.detections,{complete:$('review-complete').checked,coverage:$('review-coverage').checked,photoCount:state.photos.length}),metrics:{duration_ms:performance.now()-state.started,recognition_ms:state.recognitionMs}};state.selected=0;renderResults();};
-$('back-upload').onclick=()=>{view('upload');renderFiles();};
-function renderResults(){view('result');const rows=state.results.findings;const counts={confirmed:0,mismatch:0,unverified:0};rows.forEach(r=>counts[r.status]++);$('result-title').textContent=counts.mismatch?'Mismatches found':counts.unverified?'Clarification needed':'All items confirmed';$('result-note').textContent='Local text recognition with your reviewed labels. Unclear items stay unverified.';$('summary').innerHTML=[['confirmed','Confirmed'],['mismatch','Mismatches'],['unverified','Unverified']].map(([k,s])=>`<div><strong>${counts[k]}</strong><span>${s}</span></div>`).join('');$('findings').innerHTML=rows.map((r,i)=>`<button class="finding ${state.selected===i?'selected':''}" data-row="${i}" aria-pressed="${state.selected===i}"><strong>${esc(r.name)}</strong><span class="sku">${esc(r.sku)} · Row ${r.row}</span><span class="badge ${r.status}">${labels[r.status]}</span><p>Ordered: ${r.expected} · Verified visible: ${r.observed===null?'unknown':r.observed}</p></button>`).join('');document.querySelectorAll('[data-row]').forEach(b=>b.addEventListener('click',()=>{state.selected=Number(b.dataset.row);renderResults()}));$('demo-actions').hidden=true;const m=state.results.metrics;$('metrics').textContent=m?`Time to findings: ${(m.duration_ms/1000).toFixed(1)} s · Local recognition: ${(m.recognition_ms/1000).toFixed(1)} s · Recognition API cost: $0 · Hosting excluded`:'';showEvidence(0);}
-function showEvidence(index){const r=state.results.findings[state.selected];const ev=r.evidence[index];$('source-row').textContent=`Row ${r.row}: ${r.source_text}`;$('explanation').textContent=r.explanation;$('pdf-link').href=state.pdf.url;$('document-preview').src=state.document.preview;const db=r.source_bbox;Object.assign($('document-bbox').style,{left:db[0]*100+'%',top:db[1]*100+'%',width:db[2]*100+'%',height:db[3]*100+'%'});$('clarify').hidden=r.status!=='unverified';$('clarify-text').textContent=r.clarification||'Add a photo with a readable product code and unit identifier.';$('evidence-tabs').innerHTML=r.evidence.map((e,i)=>`<button data-evidence="${i}">Photo ${e.photo+1}</button>`).join('');document.querySelectorAll('[data-evidence]').forEach(b=>b.onclick=()=>showEvidence(Number(b.dataset.evidence)));$('evidence-image').hidden=!ev;if(ev){$('evidence-photo').src=state.photos[ev.photo].url;$('photo-number').textContent=`Photo ${ev.photo+1}`;const[x,y,w,h]=ev.bbox;Object.assign($('bbox').style,{left:x*100+'%',top:y*100+'%',width:w*100+'%',height:h*100+'%'});}else $('photo-number').textContent='No suitable view';}
-
-$('verify').onclick=verify;$('reset').onclick=reset;$('cancel-check').onclick=()=>{state.generation++;state.busy=false;stopReader();view('upload');renderFiles();error('Checking stopped. Your files are still here.');};
-$('review-again').onclick=renderReview;
-$('clarify-button').onclick=()=>{if(state.photos.length>=3){view('upload');renderFiles();error('Remove one earlier photo, then add a clearer close-up. Keep the same printed unit letter.');}else $('clarify-input').click();};
-$('clarify-input').onchange=async e=>{const files=Array.from(e.target.files);e.target.value='';view('upload');await addPhotos(files);};
-async function loadSample(corrected=true){reset();const generation=state.generation;const button=$('load-sample');button.disabled=true;button.textContent='Loading files…';try{const [p,f]=await Promise.all([fetch('assets/packing-list.pdf'),fetch('assets/'+(corrected?'corrected.jpg':'delivery.jpg'))]);if(!p.ok||!f.ok)throw new Error('Sample download failed.');const [pdf,photo]=await Promise.all([p.blob(),f.blob()]);if(generation!==state.generation)return;setPDF(new File([pdf],'sample-packing-list.pdf',{type:'application/pdf'}));await addPhotos([new File([photo],corrected?'sample-delivery.jpg':'sample-with-differences.jpg',{type:'image/jpeg'})]);$('workspace').scrollIntoView({behavior:'smooth'});}catch{error('The sample files could not load. Please reload the page.');}finally{button.disabled=false;button.textContent='Use matching sample files';}}
-$('load-sample').onclick=()=>loadSample();document.querySelectorAll('.demo-trigger').forEach(b=>b.onclick=()=>loadSample());$('correct-demo').onclick=()=>loadSample(true);$('original-demo').onclick=()=>loadSample(false);
+function showEvidence(index){
+ const r=state.results.findings[state.selected],ev=r.evidence[index];$('source-row').textContent=`Row ${r.row}: ${r.source_text}`;$('explanation').textContent=r.explanation;
+ $('pdf-link').href=state.documentFile.url;$('document-preview').src=state.document.preview;const db=r.source_bbox;Object.assign($('document-bbox').style,{left:db[0]*100+'%',top:db[1]*100+'%',width:db[2]*100+'%',height:db[3]*100+'%'});
+ $('clarify').hidden=r.status!=='unverified';$('clarify-text').textContent=r.clarification;
+ $('evidence-tabs').innerHTML=r.evidence.length>1?r.evidence.map((_,i)=>`<button data-evidence="${i}">Label ${i+1}</button>`).join(''):'';
+ document.querySelectorAll('[data-evidence]').forEach(b=>b.onclick=()=>showEvidence(Number(b.dataset.evidence)));
+ $('evidence-photo').src=state.photo.url;$('photo-number').textContent='Delivery overview';const[x,y,w,h]=ev.bbox;Object.assign($('bbox').style,{left:x*100+'%',top:y*100+'%',width:w*100+'%',height:h*100+'%'});
+}
+$('verify').onclick=verify;$('reset').onclick=reset;
+$('cancel-check').onclick=()=>{state.generation++;state.busy=false;stopReader();view('upload');renderFiles();error('Checking stopped. Your files are still here.');};
+$('clarify-button').onclick=()=>{view('upload');renderFiles();error('Replace the document if its text is unclear, or replace the delivery overview with a sharper photo of all items.');};
 const backgroundVideo=$('background-video');if(backgroundVideo){const motion=window.matchMedia('(prefers-reduced-motion: reduce)');const updateMotion=()=>{if(motion.matches)backgroundVideo.pause();else backgroundVideo.play().catch(()=>{});};motion.addEventListener?.('change',updateMotion);updateMotion();document.addEventListener('visibilitychange',()=>{if(document.hidden)backgroundVideo.pause();else updateMotion();});}
 renderFiles();

@@ -1,14 +1,16 @@
 {
   "name": "crosscheck-delivery-check",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler pages dev site",
     "deploy": "wrangler pages deploy site",
-    "test": "node tests/local-engine.mjs"
+    "test": "node tests/local-engine.mjs",
+    "test:browser": "node tests/browser.mjs"
   },
   "devDependencies": {
-    "wrangler": "^4.0.0"
+    "wrangler": "^4.0.0",
+    "playwright": "1.62.1"
   }
 }
